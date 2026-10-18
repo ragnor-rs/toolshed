@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.venv/
+venv/
+
+# Claude Code local state — can accumulate credentials inside permission rules
+.claude/settings.local.json
+
+# docx-translate working files: the input you supply and everything derived from it
+docx-translate/source.docx
+docx-translate/variant*.docx
+docx-translate/sections/
+
+# audio-transcribe working files: never commit recordings or transcripts
+*.m4a
+*.mp3
+*.wav
+*_chunks/
+transcript_*.txt
+summary_*.md
