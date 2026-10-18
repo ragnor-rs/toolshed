@@ -20,3 +20,7 @@ docx-translate/sections/
 *_chunks/
 transcript_*.txt
 summary_*.md
+
+# todoist-backup output: plaintext JSON of an entire account
+todoist-backup/data/
+*.zip

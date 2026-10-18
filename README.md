@@ -1,8 +1,8 @@
 # toolshed
 
-Two small tools that came out of real jobs and were worth keeping. They share nothing but an author and a habit: let an LLM do the language work, and write a deterministic script to check that it did.
+Small tools that came out of real jobs and were worth keeping. They have no theme and no shared dependencies — the only thing they have in common is that each one was built because nothing off the shelf did the job.
 
-Neither is a product. Both run, both have known limits, and both are documented with the limits included.
+None is a product. All of them run, all of them have known limits, and the limits are written down rather than left to be discovered.
 
 ## [`docx-translate/`](docx-translate/) — structure-preserving DOCX translation
 
@@ -18,9 +18,15 @@ The terminology rules are specific to Georgian employment contracts. The pipelin
 
 `a2a_agent.py` wraps it as an [A2A protocol](https://a2a-protocol.org) agent, as a working demonstration of three things the protocol exists for: calling an external tool, deciding for itself whether a validation pass is warranted, and running a long operation through SSE streaming with `input-required` states and a multi-step task lifecycle.
 
+## [`todoist-backup/`](todoist-backup/) — full-account Todoist backup
+
+Reads an entire Todoist account through the API — projects, sections, tasks, comments, labels, filters, reminders, archived projects, completed activity — and writes a ZIP containing all of it plus a restore script generated at backup time, so a backup doesn't depend on this repository still existing.
+
+Todoist's own export is per-project CSV and drops everything that isn't a task row. The detail worth stealing if you write your own: projects, sections and tasks are topologically sorted before being recreated, because creating them in API order fails the moment a subtask comes before its parent.
+
 ## Running them
 
-Both need Python 3.11+. `docx-translate` needs `python-docx` and `lxml`; `audio-transcribe` needs `ffmpeg` on PATH and a Gemini API key, passed by flag or in `GEMINI_API_KEY`.
+All three need Python 3.11+. `docx-translate` needs `python-docx` and `lxml`; `audio-transcribe` needs `ffmpeg` on PATH and a Gemini API key; `todoist-backup` needs `httpx`, `rich` and `python-dotenv`, and a Todoist API token.
 
 No key is ever read from a file in this repository, and nothing here should be given one. Pass it through the environment.
 
