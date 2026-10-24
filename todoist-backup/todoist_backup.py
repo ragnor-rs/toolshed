@@ -463,7 +463,9 @@ def run_backup(output_dir: str):
         sys.exit(1)
 
     os.makedirs(output_dir, exist_ok=True)
-    log_dir = os.path.join(os.path.dirname(output_dir), "logs")
+    # Inside output_dir, not beside it — `--output-dir /backups` would otherwise try to
+    # create /logs at the filesystem root, after the whole account has been read.
+    log_dir = os.path.join(output_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
 
     now = datetime.now(timezone.utc)
@@ -607,4 +609,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/]")
+        sys.exit(130)
+    except httpx.HTTPStatusError as e:
+        # A traceback tells the user nothing they can act on; the status does.
+        if e.response.status_code == 401:
+            console.print("[red]Error: Todoist rejected the token (401).[/] "
+                          "Check TODOIST_API_TOKEN — Settings > Integrations > Developer.")
+        else:
+            console.print(f"[red]Error: Todoist API returned "
+                          f"{e.response.status_code} for {e.request.url.path}[/]")
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        console.print(f"[red]Error: could not reach the Todoist API:[/] {e}")
+        sys.exit(1)

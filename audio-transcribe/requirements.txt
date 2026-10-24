@@ -1,0 +1,4 @@
+# transcribe_gemini.py needs nothing from this file — it is stdlib only.
+# These are for a2a_agent.py.
+aiohttp>=3.9.0
+certifi>=2024.2.2  # optional; falls back to the system trust store without it

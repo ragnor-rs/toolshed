@@ -14,19 +14,22 @@ pip3 install -r requirements.txt
 
 ## Run
 
+The whole pipeline, end to end, on the synthetic sample — no API key needed:
+
 ```bash
-python3 sample/make_sample.py   # writes a synthetic source.docx to try on
-python3 extract_sections.py     # source.docx -> sections/section_NN.json + table_cells.json
-#                                 ... translate each section with an LLM agent,
-#                                 ... writing sections/translated_NN.json and translated_table.json
-python3 fix_json.py             # repair JSON broken by Georgian „" quote marks
-python3 stitch_docx.py          # -> "variant N.docx", N auto-incremented
-python3 verify_structure.py     # compare source against the latest variant; exit 1 on errors
+python3 sample/make_sample.py        # writes a synthetic source.docx to try on
+python3 extract_sections.py          # source.docx -> sections/section_NN.json + table_cells.json
+python3 sample/sample_translation.py # stand-in for the LLM step — sample only, see below
+python3 fix_json.py                  # repair JSON broken by Georgian „" quote marks
+python3 stitch_docx.py               # -> "variant N.docx", N auto-incremented
+python3 verify_structure.py          # compare source against the latest variant; exit 1 on errors
 ```
 
-Drop your own `source.docx` beside the scripts to use it for real. Everything derived from it is gitignored.
+That ends with `ALL CHECKS PASSED` and a `variant 1.docx` you can open.
 
-The translation step itself is deliberately not a script. It is a prompt plus a glossary, run as several parallel agents, and the guide holds both.
+For a real document, drop your own `source.docx` beside the scripts and replace step 3 with the actual translation. Everything derived from your file is gitignored.
+
+The translation step is deliberately not a script. It is a prompt plus a glossary, run as several parallel agents, and [`TRANSLATION_GUIDE.md`](TRANSLATION_GUIDE.md) holds both. `sample/sample_translation.py` exists only so the pipeline is runnable without an API key: it is a fixed lookup table for the synthetic sample, and it exits with an error rather than guessing if it is pointed at any other document.
 
 ## What verification covers
 
@@ -43,6 +46,22 @@ The translation step itself is deliberately not a script. It is a prompt plus a 
 | Russian month names | The single most common residue |
 
 Verification is structural and lexical. It cannot tell you the translation is *correct* — it tells you nothing was dropped, renumbered, or phrased with a term the Code doesn't use. Meaning still needs a human who reads both languages.
+
+### Checking that the checks work
+
+A verifier nobody has watched fail is a verifier nobody should trust. `sample/break_translation.py` damages a clean sample translation in four specific ways — a forbidden Russicism, an untranslated Russian month, a dropped paragraph, and a renumbered clause — each aimed at a different check:
+
+```bash
+python3 sample/sample_translation.py   # clean translation
+python3 sample/break_translation.py    # inject all four defects
+python3 stitch_docx.py
+python3 verify_structure.py ; echo "exit=$?"   # must be exit=1, naming all four
+python3 sample/sample_translation.py   # undo
+```
+
+If that exits 0, something is wrong with the verifier. `--defect forbidden-term` injects one at a time.
+
+One limit the exercise makes obvious: the forbidden-term check is a literal substring match, and Georgian is heavily inflected. `თანამდებობრივი ინსტრუქცია` is caught; the declined `თანამდებობრივ ინსტრუქციას` is not. The list catches the nominative forms an LLM usually produces, not every form it could.
 
 ## Known limits
 

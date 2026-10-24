@@ -14,11 +14,20 @@ if len(sys.argv) > 1:
     OUTPUT_FILE = sys.argv[1]
 else:
     import glob
-    variants = sorted(glob.glob(os.path.join(PROJECT_DIR, "variant *.docx")))
+    variants = glob.glob(os.path.join(PROJECT_DIR, "variant *.docx"))
     if not variants:
         print("ERROR: No variant files found")
         sys.exit(1)
-    OUTPUT_FILE = variants[-1]
+
+    def variant_num(path):
+        """Parse the variant number, so 'variant 10' sorts after 'variant 2'."""
+        base = os.path.basename(path)
+        try:
+            return int(base.replace("variant ", "").replace(".docx", ""))
+        except ValueError:
+            return -1
+
+    OUTPUT_FILE = max(variants, key=variant_num)
 
 print(f"Source:  {os.path.basename(SOURCE_FILE)}")
 print(f"Output:  {os.path.basename(OUTPUT_FILE)}")

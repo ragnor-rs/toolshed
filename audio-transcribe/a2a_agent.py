@@ -57,6 +57,38 @@ TRANSCRIBE_SCRIPT = SCRIPT_DIR / "scripts" / "transcribe_gemini.py"
 if not TRANSCRIBE_SCRIPT.exists():
     TRANSCRIBE_SCRIPT = SCRIPT_DIR / "transcribe_gemini.py"
 
+
+def load_env_file() -> None:
+    """Populate os.environ from the nearest .env, searching up from cwd then here.
+
+    Duplicated from transcribe_gemini.py rather than shared: both files are meant to
+    stay droppable into another project on their own. A real environment variable
+    always wins over the file.
+    """
+    for start in (Path.cwd(), SCRIPT_DIR):
+        for d in [start.resolve(), *start.resolve().parents]:
+            candidate = d / ".env"
+            if not candidate.is_file():
+                continue
+            try:
+                for line in candidate.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("export "):
+                        line = line[len("export "):].lstrip()
+                    key, sep, value = line.partition("=")
+                    if not sep:
+                        continue
+                    key, value = key.strip(), value.strip()
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                        value = value[1:-1]
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+            except OSError:
+                pass
+            return
+
 # ---------------------------------------------------------------------------
 # Gemini text API (zero-dep)
 # ---------------------------------------------------------------------------
@@ -393,11 +425,14 @@ async def skill_transcribe(ctx: TaskContext):
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
 
-        # Stream progress from tool's stderr
+        # Stream progress from tool's stderr. Keep every line — the loop drains the
+        # pipe, so there is nothing left to read back if the tool exits non-zero.
+        stderr_lines = []
         while True:
             line = await proc.stderr.readline()
             if not line:
                 break
+            stderr_lines.append(line.decode(errors="replace").rstrip())
             try:
                 evt = json.loads(line.decode().strip())
                 etype = evt.get("event", "")
@@ -420,8 +455,10 @@ async def skill_transcribe(ctx: TaskContext):
 
         await proc.wait()
         if proc.returncode != 0:
-            stderr_text = (await proc.stderr.read()).decode()
-            await emit(ctx, "failed", f"[TOOL] transcribe_gemini.py failed for {fname}:\n{stderr_text}")
+            stderr_text = "\n".join(stderr_lines[-20:]) or "(no output on stderr)"
+            await emit(ctx, "failed",
+                f"[TOOL] transcribe_gemini.py failed for {fname} "
+                f"(exit {proc.returncode}):\n{stderr_text}")
             return
 
         transcription_files[audio_path] = output_path
@@ -738,7 +775,8 @@ async def handle_send(params: dict, workdir: str) -> dict:
     return snapshot(ctx)
 
 
-async def handle_send_subscribe(params: dict, workdir: str, response: web.StreamResponse):
+async def handle_send_subscribe(params: dict, workdir: str, request: web.Request,
+                                response: web.StreamResponse):
     task_id = params.get("id", str(uuid.uuid4()))
     session_id = params.get("sessionId", str(uuid.uuid4()))
     message = params.get("message", {})
@@ -763,7 +801,7 @@ async def handle_send_subscribe(params: dict, workdir: str, response: web.Stream
     response.content_type = "text/event-stream"
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Connection"] = "keep-alive"
-    await response.prepare(response._req)
+    await response.prepare(request)
 
     try:
         while True:
@@ -820,7 +858,7 @@ async def route_jsonrpc(request: web.Request) -> web.Response:
         return web.json_response(jsonrpc_ok(rid, await handle_send(params, workdir)))
     elif method == "tasks/sendSubscribe":
         resp = web.StreamResponse()
-        await handle_send_subscribe(params, workdir, resp)
+        await handle_send_subscribe(params, workdir, request, resp)
         return resp
     elif method == "tasks/get":
         return web.json_response(jsonrpc_ok(rid, await handle_get(params)))
@@ -852,6 +890,7 @@ def main():
     p.add_argument("--gemini-key", default="")
     args = p.parse_args()
 
+    load_env_file()
     key = args.gemini_key or os.environ.get("GEMINI_API_KEY", "")
     app = create_app(args.workdir, key)
 

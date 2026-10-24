@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Transcribe audio files with speaker diarization using Google Gemini 2.5 Pro.
+Transcribe audio files with speaker diarization through the Gemini API.
 
 Zero external dependencies — uses only stdlib (urllib, json, ssl).
 Splits long audio into chunks via ffmpeg for reliable processing.
+
+The model is a flag (--model); see `DEFAULT_MODEL` below for the default.
 
 Usage:
     python3 transcribe_gemini.py \
@@ -37,6 +39,54 @@ except ImportError:
     _ssl_context = ssl.create_default_context()
 
 
+DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+
+
+def _find_env_file() -> str | None:
+    """Nearest .env, searching up from the cwd and then from this script."""
+    for start in (os.getcwd(), os.path.dirname(os.path.abspath(__file__))):
+        d = os.path.abspath(start)
+        while True:
+            candidate = os.path.join(d, ".env")
+            if os.path.isfile(candidate):
+                return candidate
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+    return None
+
+
+def load_env_file() -> None:
+    """Populate os.environ from the nearest .env file.
+
+    Hand-rolled rather than python-dotenv on purpose: this script has no third-party
+    dependencies and that is the point of it. A real environment variable always wins
+    over the file, matching dotenv's own precedence.
+    """
+    path = _find_env_file()
+    if not path:
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
+                key, sep, value = line.partition("=")
+                if not sep:
+                    continue
+                key = key.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        pass
+
 MIME_TYPES = {
     ".mp3": "audio/mpeg",
     ".m4a": "audio/mp4",
@@ -59,7 +109,7 @@ def get_mime_type(path: str) -> str:
 
 
 def get_audio_duration(path: str) -> float:
-    """Get audio duration in seconds using ffprobe."""
+    """Get audio duration in seconds using ffprobe. Returns 0 if it cannot be read."""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
@@ -67,7 +117,11 @@ def get_audio_duration(path: str) -> float:
             capture_output=True, text=True, timeout=30,
         )
         return float(result.stdout.strip())
-    except Exception:
+    except Exception as e:
+        # Worth saying out loud: callers treat 0 as "short enough not to split", so a
+        # broken ffprobe silently turns chunking off. A dyld failure from a partial
+        # Homebrew upgrade looks exactly like a 0-second file otherwise.
+        log("duration_unknown", file=os.path.basename(path), reason=str(e)[:200])
         return 0
 
 
@@ -171,17 +225,37 @@ def line_ts_seconds(line: str) -> int:
     return -1
 
 
-def find_splice_point(chunk_a_lines: list[str], chunk_b_lines: list[str]) -> tuple[int, int]:
+def find_splice_point(chunk_a_lines: list[str], chunk_b_lines: list[str],
+                      overlap_start: float | None = None,
+                      overlap_end: float | None = None) -> tuple[int, int]:
     """Find the best content-based splice point between two overlapping chunks.
 
     Compares lines from the end of chunk_a with lines from the start of chunk_b.
     Looks for matching speaker + similar text. Returns (cut_a, start_b) indices:
     keep chunk_a[:cut_a] and chunk_b[start_b:].
+
+    overlap_start/overlap_end bound the search to the time range the two chunks can
+    actually share, in the same timebase as the lines. That bound is not an
+    optimisation — without it, a coincidental match early in chunk_a returns cut_a=0
+    and silently discards every line accumulated so far. Repeated phrasing in a
+    meeting is enough to trigger it.
     """
-    # Search window: last 30 lines of A vs first 30 lines of B
-    tail_a = chunk_a_lines[-30:] if len(chunk_a_lines) > 30 else chunk_a_lines
+    # The splice may never cut before the overlap begins: anything earlier than that
+    # exists only in chunk_a, so cutting it would drop content outright.
+    min_cut_a = 0
+    if overlap_start is not None:
+        min_cut_a = len(chunk_a_lines)
+        for idx, line in enumerate(chunk_a_lines):
+            ts = line_ts_seconds(line)
+            if ts >= 0 and ts >= overlap_start:
+                min_cut_a = idx
+                break
+
+    # Search window: last 30 lines of A, but never reaching before the overlap.
+    window_start = max(min_cut_a, len(chunk_a_lines) - 30, 0)
+    tail_a = chunk_a_lines[window_start:]
+    offset_a = window_start
     head_b = chunk_b_lines[:30] if len(chunk_b_lines) > 30 else chunk_b_lines
-    offset_a = len(chunk_a_lines) - len(tail_a)
 
     best_score = 0
     best_a_idx = len(chunk_a_lines)
@@ -192,21 +266,28 @@ def find_splice_point(chunk_a_lines: list[str], chunk_b_lines: list[str]) -> tup
         if not speaker_a:
             continue
         for j, line_b in enumerate(head_b):
+            if overlap_end is not None:
+                ts_b = line_ts_seconds(line_b)
+                if ts_b >= 0 and ts_b > overlap_end:
+                    break  # lines are in order; past the overlap there is no match
             speaker_b, text_b = extract_speaker_text(line_b)
             if not speaker_b:
                 continue
             if speaker_a != speaker_b:
                 continue
             sim = text_similarity(text_a, text_b)
-            if sim > best_score:
+            # >= rather than >, so among equally good matches the latest one in A
+            # wins. That is the one which discards the least content.
+            if sim > 0 and sim >= best_score:
                 best_score = sim
                 best_a_idx = offset_a + i
                 best_b_idx = j
 
     if best_score >= 0.4:
+        cut_a = max(best_a_idx, min_cut_a)
         log("splice_found", score=round(best_score, 2),
-            cut_a=best_a_idx, start_b=best_b_idx)
-        return best_a_idx, best_b_idx
+            cut_a=cut_a, start_b=best_b_idx, kept_a=cut_a, total_a=len(chunk_a_lines))
+        return cut_a, best_b_idx
 
     # Fallback: use timestamps. Keep all of A, skip B lines whose
     # timestamps are <= the last timestamp in A.
@@ -310,7 +391,16 @@ def stitch_chunks(chunks_text: list[str], chunk_starts: list[float],
     result = list(all_parsed[0])
 
     for i in range(1, len(all_parsed)):
-        cut_a, start_b = find_splice_point(result, all_parsed[i])
+        # The region chunk i genuinely shares with everything before it: it begins at
+        # chunk i's own start time and lasts for the overlap. Bounding the search to
+        # it is what stops a splice from discarding the accumulated transcript.
+        overlap_start = overlap_end = None
+        if chunk_starts and i < len(chunk_starts) and overlap_seconds > 0:
+            overlap_start = chunk_starts[i]
+            overlap_end = chunk_starts[i] + overlap_seconds
+
+        cut_a, start_b = find_splice_point(
+            result, all_parsed[i], overlap_start, overlap_end)
         chunk_b_kept = all_parsed[i][start_b:]
 
         # Check boundary: if last line of A and first line of B overlap,
@@ -371,8 +461,16 @@ def upload_file(api_key: str, file_path: str) -> str:
             "Content-Type": mime_type,
         },
     )
-    with urllib.request.urlopen(req, timeout=300, context=_ssl_context) as resp:
-        result = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=300, context=_ssl_context) as resp:
+            result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # The body says why — most often an invalid or unauthorized API key.
+        try:
+            body = e.read().decode(errors="replace").strip()
+        except Exception:
+            body = ""
+        raise RuntimeError(f"Upload failed ({e}): {body[:600]}") from e
 
     file_uri = result["file"]["uri"]
     state = result["file"]["state"]
@@ -433,7 +531,7 @@ def transcribe(
     file_uri: str,
     prompt: str,
     mime_type: str,
-    model: str = "gemini-2.5-pro",
+    model: str = DEFAULT_MODEL,
     max_retries: int = 5,
 ) -> str:
     """Send transcription request to Gemini API. Retries on transient errors."""
@@ -495,6 +593,15 @@ def transcribe(
 
         except (urllib.error.HTTPError, RuntimeError, urllib.error.URLError, TimeoutError, OSError) as e:
             error_str = str(e)
+            # An HTTPError carries Google's actual explanation in the body — "API key
+            # not valid", a quota name, the rejected model id. str(e) is just the code.
+            if isinstance(e, urllib.error.HTTPError):
+                try:
+                    body = e.read().decode(errors="replace").strip()
+                except Exception:
+                    body = ""
+                if body:
+                    error_str = f"{error_str}: {body[:600]}"
             is_transient = any(
                 code in error_str
                 for code in ["503", "429", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "Empty response", "timed out"]
@@ -504,7 +611,7 @@ def transcribe(
                 log("error", message=error_str, retry=attempt, wait_seconds=wait)
                 time.sleep(wait)
                 continue
-            raise
+            raise RuntimeError(error_str) from e
 
 
 def fix_timestamps(text: str) -> str:
@@ -577,16 +684,19 @@ def main():
     parser.add_argument("--language", default="ru", help="Language code (e.g., ru, en)")
     parser.add_argument("--api-key", default="", help="Gemini API key")
     parser.add_argument("--output", default="", help="Output file path")
-    parser.add_argument("--model", default="gemini-3.1-flash-lite-preview", help="Gemini model name")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Gemini model name (default: {DEFAULT_MODEL})")
     parser.add_argument("--chunk-minutes", type=int, default=10,
                         help="Split audio into chunks of N minutes (0 = no split, default: 10)")
     parser.add_argument("--overlap-seconds", type=int, default=15,
                         help="Overlap between chunks in seconds (default: 15)")
     args = parser.parse_args()
 
+    load_env_file()
     api_key = args.api_key or os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        print("Error: No API key. Use --api-key or set GEMINI_API_KEY", file=sys.stderr)
+        print("Error: No API key. Use --api-key, set GEMINI_API_KEY, or put "
+              "GEMINI_API_KEY=... in a .env file beside the repo root.", file=sys.stderr)
         sys.exit(1)
 
     if not os.path.exists(args.file):
@@ -606,6 +716,16 @@ def main():
     chunk_seconds = args.chunk_minutes * 60
     overlap_seconds = args.overlap_seconds
 
+    # split_audio advances by (chunk - overlap); a non-positive step never terminates.
+    if chunk_seconds > 0 and overlap_seconds >= chunk_seconds:
+        print(f"Error: --overlap-seconds ({overlap_seconds}) must be less than the "
+              f"chunk length ({chunk_seconds}s from --chunk-minutes "
+              f"{args.chunk_minutes}).", file=sys.stderr)
+        sys.exit(1)
+    if overlap_seconds < 0:
+        print("Error: --overlap-seconds cannot be negative.", file=sys.stderr)
+        sys.exit(1)
+
     # Split into chunks if needed
     tmpdir = None
     if chunk_seconds > 0 and shutil.which("ffmpeg"):
@@ -616,7 +736,20 @@ def main():
                 chunk_minutes=args.chunk_minutes, overlap_seconds=overlap_seconds)
             audio_chunks = split_audio(args.file, chunk_seconds, overlap_seconds, tmpdir)
         else:
+            if duration <= 0:
+                print(
+                    "Warning: ffprobe could not read the duration, so the file is being "
+                    "sent as a single request with no chunking. If this is a long "
+                    "recording, expect a truncated or failed transcription. Check that "
+                    "ffmpeg/ffprobe actually run (`ffprobe -version`), or pass "
+                    "--chunk-minutes 0 to make this explicit.",
+                    file=sys.stderr,
+                )
             audio_chunks = [(args.file, 0)]
+    elif chunk_seconds > 0:
+        print("Warning: ffmpeg not on PATH — sending the file as a single request "
+              "with no chunking.", file=sys.stderr)
+        audio_chunks = [(args.file, 0)]
     else:
         audio_chunks = [(args.file, 0)]
 
@@ -679,4 +812,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        sys.exit(130)
+    except Exception as e:
+        # A traceback here is never the useful part — the API's message is.
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)

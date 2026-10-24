@@ -26,9 +26,27 @@ Todoist's own export is per-project CSV and drops everything that isn't a task r
 
 ## Running them
 
-All three need Python 3.11+. `docx-translate` needs `python-docx` and `lxml`; `audio-transcribe` needs `ffmpeg` on PATH and a Gemini API key; `todoist-backup` needs `httpx`, `rich` and `python-dotenv`, and a Todoist API token.
+All three need Python 3.11+, and each has its own `requirements.txt`:
 
-No key is ever read from a file in this repository, and nothing here should be given one. Pass it through the environment.
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r docx-translate/requirements.txt    # python-docx, lxml
+pip install -r audio-transcribe/requirements.txt  # aiohttp, for the A2A agent only
+pip install -r todoist-backup/requirements.txt    # httpx, rich, python-dotenv
+```
+
+`docx-translate` runs end to end with no API key — `cd docx-translate && python3 sample/make_sample.py` and follow its README. `audio-transcribe` needs `ffmpeg` on PATH and a Gemini API key; `todoist-backup` needs a Todoist API token.
+
+Keys come from the environment, or from a `.env` file in the repository root:
+
+```
+GEMINI_API_KEY=...
+TODOIST_API_TOKEN=...
+```
+
+`.env` is gitignored at every level, and a real environment variable always wins over it. `chmod 600 .env` — the default `644` leaves your keys readable by every account on the machine. Prefer the file over `export KEY=...` in an interactive shell, which writes the key into your shell history in plaintext.
+
+No key is ever committed, and nothing here should be given a key you cannot rotate.
 
 ## License
 

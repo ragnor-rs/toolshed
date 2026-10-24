@@ -13,7 +13,9 @@ document type, replace the glossary and the forbidden-term list in
 ## Source & Output
 
 - **Input:** `source.docx`, beside the scripts. Run `sample/make_sample.py` to generate a
-  synthetic one to try the pipeline on.
+  synthetic one to try the pipeline on. For that synthetic document only,
+  `sample/sample_translation.py` stands in for the agent step below, so the pipeline can
+  be run end to end without an API key. It is a fixed lookup table, not a translator.
 - **Output:** `variant X.docx`, X = next available number
 - **Language:** Russian → Georgian
 
