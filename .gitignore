@@ -21,6 +21,8 @@ docx-translate/sections/
 transcript_*.txt
 summary_*.md
 
-# todoist-backup output: plaintext JSON of an entire account
-todoist-backup/data/
+# todoist-backup output: plaintext JSON of an entire account.
+# Unanchored so it matches wherever --output-dir lands it, including the repo
+# root when the script runs from there with its default relative path.
+data/
 *.zip
